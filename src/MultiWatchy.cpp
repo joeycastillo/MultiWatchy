@@ -1,7 +1,11 @@
-#include "Watchy.h"
+#include "MultiWatchy.h"
+#include "WatchFace.h"
 
-WatchyRTC Watchy::RTC;
-GxEPD2_BW<WatchyDisplay, WatchyDisplay::HEIGHT> Watchy::display(
+#include <Fonts/FreeMonoBold9pt7b.h>
+#include "DSEG7_Classic_Bold_53.h"
+
+WatchyRTC MultiWatchy::RTC;
+GxEPD2_BW<WatchyDisplay, WatchyDisplay::HEIGHT> MultiWatchy::display(
     WatchyDisplay(DISPLAY_CS, DISPLAY_DC, DISPLAY_RES, DISPLAY_BUSY));
 
 RTC_DATA_ATTR int guiState;
@@ -15,8 +19,9 @@ RTC_DATA_ATTR bool displayFullInit       = true;
 RTC_DATA_ATTR long gmtOffset = 0;
 RTC_DATA_ATTR bool alreadyInMenu         = true;
 RTC_DATA_ATTR tmElements_t bootTime;
+RTC_DATA_ATTR int currentWatchFaceIndex = 0;
 
-void Watchy::init(String datetime) {
+void MultiWatchy::init(String datetime) {
   esp_sleep_wakeup_cause_t wakeup_reason;
   wakeup_reason = esp_sleep_get_wakeup_cause(); // get wake up reason
   Wire.begin(SDA, SCL);                         // init i2c
@@ -68,13 +73,13 @@ void Watchy::init(String datetime) {
   deepSleep();
 }
 
-void Watchy::displayBusyCallback(const void *) {
+void MultiWatchy::displayBusyCallback(const void *) {
   gpio_wakeup_enable((gpio_num_t)DISPLAY_BUSY, GPIO_INTR_LOW_LEVEL);
   esp_sleep_enable_gpio_wakeup();
   esp_light_sleep_start();
 }
 
-void Watchy::deepSleep() {
+void MultiWatchy::deepSleep() {
   display.hibernate();
   if (displayFullInit) // For some reason, seems to be enabled on first boot
     esp_sleep_disable_wakeup_source(ESP_SLEEP_WAKEUP_ALL);
@@ -96,7 +101,7 @@ void Watchy::deepSleep() {
   esp_deep_sleep_start();
 }
 
-void Watchy::handleButtonPress() {
+void MultiWatchy::handleButtonPress() {
   uint64_t wakeupBit = esp_sleep_get_ext1_wakeup_status();
   // Menu Button
   if (wakeupBit & MENU_BTN_MASK) {
@@ -156,6 +161,7 @@ void Watchy::handleButtonPress() {
       }
       showMenu(menuIndex, true);
     } else if (guiState == WATCHFACE_STATE) {
+      previousWatchFace();
       return;
     }
   }
@@ -168,6 +174,7 @@ void Watchy::handleButtonPress() {
       }
       showMenu(menuIndex, true);
     } else if (guiState == WATCHFACE_STATE) {
+      nextWatchFace();
       return;
     }
   }
@@ -250,7 +257,7 @@ void Watchy::handleButtonPress() {
   }
 }
 
-void Watchy::showMenu(byte menuIndex, bool partialRefresh) {
+void MultiWatchy::showMenu(byte menuIndex, bool partialRefresh) {
   display.setFullWindow();
   display.fillScreen(GxEPD_BLACK);
   display.setFont(&FreeMonoBold9pt7b);
@@ -283,7 +290,7 @@ void Watchy::showMenu(byte menuIndex, bool partialRefresh) {
   alreadyInMenu = false;
 }
 
-void Watchy::showFastMenu(byte menuIndex) {
+void MultiWatchy::showFastMenu(byte menuIndex) {
   display.setFullWindow();
   display.fillScreen(GxEPD_BLACK);
   display.setFont(&FreeMonoBold9pt7b);
@@ -315,7 +322,7 @@ void Watchy::showFastMenu(byte menuIndex) {
   guiState = MAIN_MENU_STATE;
 }
 
-void Watchy::showAbout() {
+void MultiWatchy::showAbout() {
   display.setFullWindow();
   display.fillScreen(GxEPD_BLACK);
   display.setFont(&FreeMonoBold9pt7b);
@@ -354,7 +361,7 @@ void Watchy::showAbout() {
   guiState = APP_STATE;
 }
 
-void Watchy::showBuzz() {
+void MultiWatchy::showBuzz() {
   display.setFullWindow();
   display.fillScreen(GxEPD_BLACK);
   display.setFont(&FreeMonoBold9pt7b);
@@ -366,7 +373,7 @@ void Watchy::showBuzz() {
   showMenu(menuIndex, false);
 }
 
-void Watchy::vibMotor(uint8_t intervalMs, uint8_t length) {
+void MultiWatchy::vibMotor(uint8_t intervalMs, uint8_t length) {
   pinMode(VIB_MOTOR_PIN, OUTPUT);
   bool motorOn = false;
   for (int i = 0; i < length; i++) {
@@ -376,7 +383,7 @@ void Watchy::vibMotor(uint8_t intervalMs, uint8_t length) {
   }
 }
 
-void Watchy::setTime() {
+void MultiWatchy::setTime() {
 
   guiState = APP_STATE;
 
@@ -532,7 +539,7 @@ void Watchy::setTime() {
   showMenu(menuIndex, false);
 }
 
-void Watchy::showAccelerometer() {
+void MultiWatchy::showAccelerometer() {
   display.setFullWindow();
   display.fillScreen(GxEPD_BLACK);
   display.setFont(&FreeMonoBold9pt7b);
@@ -604,34 +611,61 @@ void Watchy::showAccelerometer() {
   showMenu(menuIndex, false);
 }
 
-void Watchy::showWatchFace(bool partialRefresh) {
+void MultiWatchy::addWatchFace(WatchFace *watchFace) {
+  watchFace->watch = this;
+  watchFaces.push_back(watchFace);
+}
+
+void MultiWatchy::showWatchFace(bool partialRefresh) {
   display.setFullWindow();
-  drawWatchFace();
+  if (watchFaces.size() == 0) {
+    display.setTextSize(2);
+    display.setCursor(0, 2);
+    display.println("<- Back");
+    display.setCursor(0, 198 - 7 * 2);
+    display.println("<- Menu");
+    display.setCursor(200 - 6 * 7 * 2, 2);
+    display.println("  Up ->");
+    display.setCursor(200 - 6 * 7 * 2, 198 - 7 * 2);
+    display.println("Down ->");
+    display.setCursor(10, 68);
+    display.println("No watch faces!");
+    display.setCursor(10, 84);
+    display.println("Add faces with");
+    display.setCursor(10, 100);
+    display.println("addWatchFace()");
+    display.setCursor(10, 116);
+    display.println("on MultiWatchy.");
+  } else {
+    watchFaces[currentWatchFaceIndex]->drawWatchFace();
+  }
   display.display(partialRefresh); // partial refresh
   guiState = WATCHFACE_STATE;
 }
 
-void Watchy::drawWatchFace() {
-  display.setFont(&DSEG7_Classic_Bold_53);
-  display.setCursor(5, 53 + 60);
-  if (currentTime.Hour < 10) {
-    display.print("0");
+void MultiWatchy::nextWatchFace() {
+  if (watchFaces.size() < 2) {
+    return;
   }
-  display.print(currentTime.Hour);
-  display.print(":");
-  if (currentTime.Minute < 10) {
-    display.print("0");
-  }
-  display.println(currentTime.Minute);
+  currentWatchFaceIndex = (currentWatchFaceIndex + 1) % watchFaces.size();
+  showWatchFace(false);
 }
 
-weatherData Watchy::getWeatherData() {
+void MultiWatchy::previousWatchFace() {
+  if (watchFaces.size() < 2) {
+    return;
+  }
+  currentWatchFaceIndex = (currentWatchFaceIndex + watchFaces.size() - 1) % watchFaces.size();
+  showWatchFace(false);
+}
+
+weatherData MultiWatchy::getWeatherData() {
   return getWeatherData(settings.cityID, settings.weatherUnit,
                         settings.weatherLang, settings.weatherURL,
                         settings.weatherAPIKey, settings.weatherUpdateInterval);
 }
 
-weatherData Watchy::getWeatherData(String cityID, String units, String lang,
+weatherData MultiWatchy::getWeatherData(String cityID, String units, String lang,
                                    String url, String apiKey,
                                    uint8_t updateInterval) {
   currentWeather.isMetric = units == String("metric");
@@ -684,7 +718,7 @@ weatherData Watchy::getWeatherData(String cityID, String units, String lang,
   return currentWeather;
 }
 
-float Watchy::getBatteryVoltage() {
+float MultiWatchy::getBatteryVoltage() {
   if (RTC.rtcType == DS3231) {
     return analogReadMilliVolts(BATT_ADC_PIN) / 1000.0f *
            2.0f; // Battery voltage goes through a 1/2 divider.
@@ -693,7 +727,7 @@ float Watchy::getBatteryVoltage() {
   }
 }
 
-uint16_t Watchy::_readRegister(uint8_t address, uint8_t reg, uint8_t *data,
+uint16_t MultiWatchy::_readRegister(uint8_t address, uint8_t reg, uint8_t *data,
                                uint16_t len) {
   Wire.beginTransmission(address);
   Wire.write(reg);
@@ -706,7 +740,7 @@ uint16_t Watchy::_readRegister(uint8_t address, uint8_t reg, uint8_t *data,
   return 0;
 }
 
-uint16_t Watchy::_writeRegister(uint8_t address, uint8_t reg, uint8_t *data,
+uint16_t MultiWatchy::_writeRegister(uint8_t address, uint8_t reg, uint8_t *data,
                                 uint16_t len) {
   Wire.beginTransmission(address);
   Wire.write(reg);
@@ -714,7 +748,7 @@ uint16_t Watchy::_writeRegister(uint8_t address, uint8_t reg, uint8_t *data,
   return (0 != Wire.endTransmission());
 }
 
-void Watchy::_bmaConfig() {
+void MultiWatchy::_bmaConfig() {
 
   if (sensor.begin(_readRegister, _writeRegister, delay) == false) {
     // fail to init BMA
@@ -810,7 +844,7 @@ void Watchy::_bmaConfig() {
   sensor.enableWakeupInterrupt();
 }
 
-void Watchy::setupWifi() {
+void MultiWatchy::setupWifi() {
   display.epd2.setBusyCallback(0); // temporarily disable lightsleep on busy
   WiFiManager wifiManager;
   wifiManager.resetSettings();
@@ -839,7 +873,7 @@ void Watchy::setupWifi() {
   guiState = APP_STATE;
 }
 
-void Watchy::_configModeCallback(WiFiManager *myWiFiManager) {
+void MultiWatchy::_configModeCallback(WiFiManager *myWiFiManager) {
   display.setFullWindow();
   display.fillScreen(GxEPD_BLACK);
   display.setFont(&FreeMonoBold9pt7b);
@@ -855,7 +889,7 @@ void Watchy::_configModeCallback(WiFiManager *myWiFiManager) {
   display.display(false); // full refresh
 }
 
-bool Watchy::connectWiFi() {
+bool MultiWatchy::connectWiFi() {
   if (WL_CONNECT_FAILED ==
       WiFi.begin()) { // WiFi not setup, you can also use hard coded credentials
                       // with WiFi.begin(SSID,PASS);
@@ -874,7 +908,7 @@ bool Watchy::connectWiFi() {
   return WIFI_CONFIGURED;
 }
 
-void Watchy::showUpdateFW() {
+void MultiWatchy::showUpdateFW() {
   display.setFullWindow();
   display.fillScreen(GxEPD_BLACK);
   display.setFont(&FreeMonoBold9pt7b);
@@ -894,7 +928,7 @@ void Watchy::showUpdateFW() {
   guiState = FW_UPDATE_STATE;
 }
 
-void Watchy::updateFWBegin() {
+void MultiWatchy::updateFWBegin() {
   display.setFullWindow();
   display.fillScreen(GxEPD_BLACK);
   display.setFont(&FreeMonoBold9pt7b);
@@ -980,7 +1014,7 @@ void Watchy::updateFWBegin() {
   showMenu(menuIndex, false);
 }
 
-void Watchy::showSyncNTP() {
+void MultiWatchy::showSyncNTP() {
   display.setFullWindow();
   display.fillScreen(GxEPD_BLACK);
   display.setFont(&FreeMonoBold9pt7b);
@@ -1024,17 +1058,17 @@ void Watchy::showSyncNTP() {
   showMenu(menuIndex, false);
 }
 
-bool Watchy::syncNTP() { // NTP sync - call after connecting to WiFi and
+bool MultiWatchy::syncNTP() { // NTP sync - call after connecting to WiFi and
                          // remember to turn it back off
   return syncNTP(gmtOffset,
                  settings.ntpServer.c_str());
 }
 
-bool Watchy::syncNTP(long gmt) {
+bool MultiWatchy::syncNTP(long gmt) {
   return syncNTP(gmt, settings.ntpServer.c_str());
 }
 
-bool Watchy::syncNTP(long gmt, String ntpServer) {
+bool MultiWatchy::syncNTP(long gmt, String ntpServer) {
   // NTP sync - call after connecting to
   // WiFi and remember to turn it back off
   WiFiUDP ntpUDP;
